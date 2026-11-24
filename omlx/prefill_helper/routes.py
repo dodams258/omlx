@@ -21,7 +21,8 @@ from fastapi import APIRouter, HTTPException
 
 from .. import __version__
 from ..cluster.registry import get_device_registry
-from . import launcher
+from ..oqh import format as oqh_format
+from . import agent, launcher
 from .adapters import adapter_for_model
 from .lending import active_lending, forget_host, recorded_host
 from .manager import (
@@ -29,6 +30,7 @@ from .manager import (
     file_prep,
     fit_layers,
     helper_budget,
+    helper_reserve,
     prepare,
     this_host,
     transport_for,
@@ -108,7 +110,9 @@ def _candidate(device: dict[str, Any], model_path: str, adapter: Any) -> dict:
         return {**row, "online": False, "reason": str(error)}
     shared, per_layer = adapter.memory_plan(model_path)
     limit = adapter.split_limit(len(per_layer))
-    held = fit_layers(shared, per_layer, helper_budget(info), limit)
+    held = fit_layers(
+        shared, per_layer, helper_budget(info), limit, helper_reserve(info)
+    )
     lending = info.get("lending")
     if lending:
         lending = {
@@ -124,7 +128,10 @@ def _candidate(device: dict[str, Any], model_path: str, adapter: Any) -> dict:
         "link": target.link,
         "device": info.get("device"),
         "version": info.get("version"),
-        "version_ok": transport.incompatible(info, adapter, row["name"]) is None,
+        "version_ok": transport.incompatible(
+            info, adapter, row["name"], oqh_format.checkpoint_version(model_path)
+        )
+        is None,
         "layers_fit": held,
         "budget": info.get("budget"),
         "on_battery": bool(info.get("on_battery")),
@@ -201,8 +208,11 @@ def _check(node_id: str) -> dict:
     }
     if "contracts" in info:
         # A helper daemon has its own version; the model families it can
-        # serve decide, not an equal version.
+        # serve decide, not an equal version. An older release only warns.
         version.update(families=sorted(info["contracts"]), fix=problem or "")
+        update = None if problem else agent.outdated(info)
+        if update:
+            version.update(status="warn", fix=update)
     else:
         version["expected"] = __version__
     rows.append(version)
